@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scalar CPU oracle. Every addition rounds to FP32; no NumPy/PyTorch dependency."""
 
 import math
@@ -11,8 +12,11 @@ def f32(value):
     except (OverflowError, struct.error) as exc:
         raise ContractError("NON_FINITE", "FP32 overflow") from exc
     require(math.isfinite(result), "NON_FINITE", "active value/result")
-    require(result == 0 or abs(result) >= 2**-126,
-            "UNSUPPORTED_CAPABILITY", "subnormal is outside this draft profile")
+    require(
+        result == 0 or abs(result) >= 2**-126,
+        "UNSUPPORTED_CAPABILITY",
+        "subnormal is outside this draft profile",
+    )
     return result
 
 
@@ -77,7 +81,7 @@ def fold(plan, rows):
         for t in range(n):
             if plan.valid_slots[t][slot]:
                 if seen[t]:
-                    acc[t] = [add(a, b) for a, b in zip(acc[t], canonical[t][slot])]
+                    acc[t] = [add(a, b) for a, b in zip(acc[t], canonical[t][slot], strict=True)]
                 else:
                     acc[t] = list(canonical[t][slot])
                     seen[t] = True
@@ -88,12 +92,19 @@ def fold(plan, rows):
 def forward(plan, rows, shared, residual, context):
     plan.validate(context)
     n, h = len(plan.token_ids), plan.hidden_size
-    rows = matrix(rows, len(plan.inverse_map), h, "bf16", "routed", [r[2] for r in plan.inverse_map])
+    rows = matrix(
+        rows, len(plan.inverse_map), h, "bf16", "routed", [r[2] for r in plan.inverse_map]
+    )
     shared = matrix(shared, n, h, "bf16", "shared")
     residual = matrix(residual, n, h, "bf16", "residual")
     canonical, partials, routed = fold(plan, rows)
-    after_shared = [[add(a, b) for a, b in zip(r, s)] for r, s in zip(routed, shared)]
-    precast = [[add(a, b) for a, b in zip(r, s)] for r, s in zip(after_shared, residual)]
+    after_shared = [
+        [add(a, b) for a, b in zip(r, s, strict=True)] for r, s in zip(routed, shared, strict=True)
+    ]
+    precast = [
+        [add(a, b) for a, b in zip(r, s, strict=True)]
+        for r, s in zip(after_shared, residual, strict=True)
+    ]
     output = [[bf16_value(v) for v in r] for r in precast]
     stages = {
         "canonical_fp32": matrix_hex([r for token in canonical for r in token]),
@@ -104,46 +115,74 @@ def forward(plan, rows, shared, residual, context):
         "output_bf16": matrix_hex(output, "bf16"),
     }
     return {
-        "output": output, "stages": stages,
+        "output": output,
+        "stages": stages,
         "saved": SavedForward.capture(plan, context),
-        "trace": {"schema": "p6-local-trace.draft.v1", "phase": "forward",
-                  "plan_fingerprint": plan.fingerprint, "order_hash": plan.order_hash,
-                  "boundary_hashes": {k: digest(v) for k, v in stages.items()}},
+        "trace": {
+            "schema": "p6-local-trace.v1",
+            "phase": "forward",
+            "plan_fingerprint": plan.fingerprint,
+            "order_hash": plan.order_hash,
+            "boundary_hashes": {k: digest(v) for k, v in stages.items()},
+        },
     }
 
 
 def backward(saved, dx_rows, dx_shared, context, expected_fingerprint, shared_boundary):
     plan = saved.restore(context, expected_fingerprint)
-    require(shared_boundary == plan.gradient_boundary, "GRADIENT_BOUNDARY_MISMATCH", shared_boundary)
+    require(
+        shared_boundary == plan.gradient_boundary, "GRADIENT_BOUNDARY_MISMATCH", shared_boundary
+    )
     n, h = len(plan.token_ids), plan.hidden_size
-    rows = matrix(dx_rows, len(plan.inverse_map), h, "fp32", "routed dx", [r[2] for r in plan.inverse_map])
+    rows = matrix(
+        dx_rows, len(plan.inverse_map), h, "fp32", "routed dx", [r[2] for r in plan.inverse_map]
+    )
     shared = matrix(dx_shared, n, h, "fp32", "shared dx")
     canonical, partials, routed = fold(plan, rows)
-    output = [[add(a, b) for a, b in zip(r, s)] for r, s in zip(routed, shared)]
-    return {"output": output, "output_boundary": plan.gradient_boundary,
-            "stages": {"canonical_fp32": matrix_hex([r for token in canonical for r in token]),
-                       "slot_partials_fp32": [matrix_hex(p) for p in partials],
-                       "routed_fp32": matrix_hex(routed), "output_fp32": matrix_hex(output)},
-            "trace": {"phase": "backward", "plan_fingerprint": plan.fingerprint,
-                      "order_hash": plan.order_hash}}
+    output = [
+        [add(a, b) for a, b in zip(r, s, strict=True)] for r, s in zip(routed, shared, strict=True)
+    ]
+    return {
+        "output": output,
+        "output_boundary": plan.gradient_boundary,
+        "stages": {
+            "canonical_fp32": matrix_hex([r for token in canonical for r in token]),
+            "slot_partials_fp32": [matrix_hex(p) for p in partials],
+            "routed_fp32": matrix_hex(routed),
+            "output_fp32": matrix_hex(output),
+        },
+        "trace": {
+            "phase": "backward",
+            "plan_fingerprint": plan.fingerprint,
+            "order_hash": plan.order_hash,
+        },
+    }
 
 
 def gradient_dispatch(saved, dy, context, expected_fingerprint):
     """P4 mock only: same dy gathered for every valid slot, no route weighting."""
     plan = saved.restore(context, expected_fingerprint)
     dy = matrix(dy, len(plan.token_ids), plan.hidden_size, "fp32", "dy")
-    table = dict(zip(plan.token_ids, dy))
-    return [list(table[t]) if valid else [0.0] * plan.hidden_size
-            for t, slot, valid in plan.inverse_map]
+    table = dict(zip(plan.token_ids, dy, strict=True))
+    return [
+        list(table[t]) if valid else [0.0] * plan.hidden_size for t, slot, valid in plan.inverse_map
+    ]
 
 
 def mock_return(plan, rows, arrival, context):
     """P4 mock delivers by logical receive index, independent of readiness."""
     plan.validate(context)
     require(len(rows) == len(plan.inverse_map), "UNSUPPORTED_GEOMETRY", "return rows")
-    require(type(arrival) in (list, tuple) and all(type(i) is int for i in arrival),
-            "INVALID_DISCRETE_PLAN", "arrival type")
-    require(sorted(arrival) == list(range(len(rows))), "INVALID_DISCRETE_PLAN", "incomplete/duplicate arrival")
+    require(
+        type(arrival) in (list, tuple) and all(type(i) is int for i in arrival),
+        "INVALID_DISCRETE_PLAN",
+        "arrival type",
+    )
+    require(
+        sorted(arrival) == list(range(len(rows))),
+        "INVALID_DISCRETE_PLAN",
+        "incomplete/duplicate arrival",
+    )
     result = [None] * len(rows)
     for logical_index in arrival:
         result[logical_index] = list(rows[logical_index])

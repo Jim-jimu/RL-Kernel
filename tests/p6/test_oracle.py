@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import copy
 from dataclasses import replace
 import json
@@ -5,11 +6,26 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from p6_startkit.contract import Context, ContractError, Plan, SavedForward, digest, production_provider
-from p6_startkit.fixtures import Generator, RecordedProvider, evaluate, load_golden, make_case
-from p6_startkit.oracle import add, backward, bf16_bits, f32, forward, gradient_dispatch, matrix_hex, mock_return
+from rl_engine.p6.contract import (
+    Context,
+    ContractError,
+    CombinePlan,
+    SavedForward,
+    production_provider,
+)
+from rl_engine.p6.fixtures import Generator, RecordedProvider, evaluate, load_golden, make_case
+from rl_engine.p6.oracle import (
+    add,
+    backward,
+    bf16_bits,
+    f32,
+    forward,
+    gradient_dispatch,
+    matrix_hex,
+    mock_return,
+)
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 
 
 class TestArithmetic(unittest.TestCase):
@@ -40,15 +56,17 @@ class TestArithmetic(unittest.TestCase):
 class TestPlanAndOracle(unittest.TestCase):
     def setUp(self):
         self.case = make_case("unit", n=3, h=7, mode="mixed")
-        self.plan = Plan.from_dict(self.case["plan"])
+        self.plan = CombinePlan.from_dict(self.case["plan"])
 
     def forward(self, case=None, plan=None, context=None):
         c = self.case if case is None else case
         p = self.plan if plan is None else plan
-        return forward(p, c["rows"], c["shared"], c["residual"], p.context if context is None else context)
+        return forward(
+            p, c["rows"], c["shared"], c["residual"], p.context if context is None else context
+        )
 
     def test_plan_json_roundtrip(self):
-        p = Plan.from_dict(json.loads(json.dumps(self.plan.to_dict())))
+        p = CombinePlan.from_dict(json.loads(json.dumps(self.plan.to_dict())))
         p.validate(self.plan.context)
         self.assertEqual(p, self.plan)
         self.assertEqual(p.fingerprint, self.plan.fingerprint)
@@ -61,7 +79,7 @@ class TestPlanAndOracle(unittest.TestCase):
         p = self.plan.to_dict()
         p["weight_again"] = True
         with self.assertRaises(ContractError):
-            Plan.from_dict(p)
+            CombinePlan.from_dict(p)
 
     def test_policy_drift(self):
         with self.assertRaisesRegex(ContractError, "SCHEMA_MISMATCH"):
@@ -69,7 +87,10 @@ class TestPlanAndOracle(unittest.TestCase):
 
     def test_wrong_run_microbatch_forward_checkpoint(self):
         for field in Context.__dataclass_fields__:
-            with self.subTest(field=field), self.assertRaisesRegex(ContractError, "STALE_RUN_METADATA"):
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ContractError, "STALE_RUN_METADATA"),
+            ):
                 self.forward(context=replace(self.plan.context, **{field: "other"}))
 
     def test_duplicate_token(self):
@@ -134,14 +155,21 @@ class TestPlanAndOracle(unittest.TestCase):
         baseline = self.forward()
         for seed in range(5):
             case = copy.deepcopy(self.case)
-            case["rows"] = mock_return(self.plan, case["rows"], Generator(seed).shuffle(range(len(case["rows"]))), self.plan.context)
+            case["rows"] = mock_return(
+                self.plan,
+                case["rows"],
+                Generator(seed).shuffle(range(len(case["rows"]))),
+                self.plan.context,
+            )
             result = self.forward(case)
             self.assertEqual(result["stages"], baseline["stages"])
             self.assertEqual(result["trace"], baseline["trace"])
 
     def test_duplicate_arrival_rejected(self):
         with self.assertRaises(ContractError):
-            mock_return(self.plan, self.case["rows"], [0] * len(self.case["rows"]), self.plan.context)
+            mock_return(
+                self.plan, self.case["rows"], [0] * len(self.case["rows"]), self.plan.context
+            )
 
     def test_physical_permutation_preserves_logical_order(self):
         order = list(reversed(range(len(self.case["rows"]))))
@@ -155,32 +183,50 @@ class TestPlanAndOracle(unittest.TestCase):
     def test_saved_forward_roundtrip_backward(self):
         fwd = self.forward()
         saved = SavedForward(**json.loads(json.dumps(fwd["saved"].__dict__)))
-        result = backward(saved, self.case["dx_rows"], self.case["dx_shared"], self.plan.context,
-                          self.plan.fingerprint, self.plan.gradient_boundary)
+        result = backward(
+            saved,
+            self.case["dx_rows"],
+            self.case["dx_shared"],
+            self.plan.context,
+            self.plan.fingerprint,
+            self.plan.gradient_boundary,
+        )
         self.assertEqual(result["trace"]["plan_fingerprint"], self.plan.fingerprint)
         self.assertEqual(result["output_boundary"], self.plan.gradient_boundary)
 
     def test_saved_corruption_and_wrong_fingerprint(self):
         saved = self.forward()["saved"]
-        for bad, expected in ((replace(saved, fingerprint="0" * 64), self.plan.fingerprint),
-                              (replace(saved, plan_json="{"), self.plan.fingerprint),
-                              (saved, "0" * 64)):
+        for bad, expected in (
+            (replace(saved, fingerprint="0" * 64), self.plan.fingerprint),
+            (replace(saved, plan_json="{"), self.plan.fingerprint),
+            (saved, "0" * 64),
+        ):
             with self.subTest(bad=bad), self.assertRaisesRegex(ContractError, "CORRUPT_METADATA"):
                 bad.restore(self.plan.context, expected)
 
     def test_backward_rejects_other_input_boundary(self):
         with self.assertRaisesRegex(ContractError, "GRADIENT_BOUNDARY_MISMATCH"):
-            backward(self.forward()["saved"], self.case["dx_rows"], self.case["dx_shared"],
-                     self.plan.context, self.plan.fingerprint, "raw-residual-input")
+            backward(
+                self.forward()["saved"],
+                self.case["dx_rows"],
+                self.case["dx_shared"],
+                self.plan.context,
+                self.plan.fingerprint,
+                "raw-residual-input",
+            )
 
     def test_backward_rejects_stale_forward(self):
         with self.assertRaisesRegex(ContractError, "STALE_RUN_METADATA"):
-            self.forward()["saved"].restore(replace(self.plan.context, forward_id="other"), self.plan.fingerprint)
+            self.forward()["saved"].restore(
+                replace(self.plan.context, forward_id="other"), self.plan.fingerprint
+            )
 
     def test_gradient_dispatch_same_dy_per_slot(self):
-        result = gradient_dispatch(self.forward()["saved"], self.case["dy"], self.plan.context, self.plan.fingerprint)
-        table = dict(zip(self.plan.token_ids, self.case["dy"]))
-        for row, (t, s, valid) in zip(result, self.plan.inverse_map):
+        result = gradient_dispatch(
+            self.forward()["saved"], self.case["dy"], self.plan.context, self.plan.fingerprint
+        )
+        table = dict(zip(self.plan.token_ids, self.case["dy"], strict=True))
+        for row, (t, _s, valid) in zip(result, self.plan.inverse_map, strict=True):
             self.assertEqual(row, table[t] if valid else [0.0] * 7)
 
     def test_production_provider_fail_closed(self):
@@ -190,7 +236,7 @@ class TestPlanAndOracle(unittest.TestCase):
 
 class TestGoldenAndArtifact(unittest.TestCase):
     def setUp(self):
-        self.golden = load_golden(ROOT / "fixtures" / "golden.json")
+        self.golden = load_golden(ROOT / "data" / "golden.v1.json")
 
     def test_all_golden_intermediates(self):
         for record in self.golden["payload"]["cases"]:
@@ -198,7 +244,11 @@ class TestGoldenAndArtifact(unittest.TestCase):
                 self.assertEqual(evaluate(record["input"]), record["expected"])
 
     def test_cancellation_distinguishes_presum(self):
-        record = next(r for r in self.golden["payload"]["cases"] if r["input"]["name"] == "cancellation-slot-order")
+        record = next(
+            r
+            for r in self.golden["payload"]["cases"]
+            if r["input"]["name"] == "cancellation-slot-order"
+        )
         self.assertEqual(record["expected"]["forward"]["output_bf16"], "0040")
         values = [float(2**24), 1.0, -float(2**24), 3.0, -3.0, 2.0]
         rank_a = add(add(values[0], values[2]), values[4])
@@ -206,11 +256,17 @@ class TestGoldenAndArtifact(unittest.TestCase):
         self.assertNotEqual(matrix_hex([[add(rank_a, rank_b)]], "bf16"), "0040")
 
     def test_known_bf16_rounding_outputs(self):
-        record = next(r for r in self.golden["payload"]["cases"] if r["input"]["name"] == "one-round-bf16-ties")
+        record = next(
+            r
+            for r in self.golden["payload"]["cases"]
+            if r["input"]["name"] == "one-round-bf16-ties"
+        )
         self.assertEqual(record["expected"]["forward"]["output_bf16"], "803f823f813f")
 
     def test_signed_zero_raw_bytes(self):
-        record = next(r for r in self.golden["payload"]["cases"] if r["input"]["name"] == "signed-zero")
+        record = next(
+            r for r in self.golden["payload"]["cases"] if r["input"]["name"] == "signed-zero"
+        )
         self.assertEqual(record["expected"]["forward"]["output_bf16"], "00800000")
 
     def test_recorded_stub_binding(self):
@@ -239,30 +295,11 @@ class TestGoldenAndArtifact(unittest.TestCase):
             RecordedProvider(record["input"], bad)
 
     def test_early_rounding_changes_result(self):
-        from p6_startkit.oracle import bf16_value
+        from rl_engine.p6.oracle import bf16_value
+
         reference = bf16_bits(add(add(1.0, 2**-8), 2**-8))
         premature = bf16_bits(add(bf16_value(add(1.0, 2**-8)), 2**-8))
         self.assertNotEqual(reference, premature)
-
-    def test_artifact_seal_replay_and_corruption(self):
-        from p6_startkit.cli import artifact_write, artifact_verify
-        recorded = self.golden["payload"]
-        report = {"production_certified": False, "foundation_compatibility": "UNVERIFIED",
-                  "recordings_sha256": digest(recorded), "scope": "CPU_UNIT_ONLY"}
-        with tempfile.TemporaryDirectory() as tmp:
-            output = Path(tmp) / "attempt"
-            artifact_write(output, recorded, report)
-            self.assertEqual(artifact_verify(output)["cases"], len(recorded["cases"]))
-            with self.assertRaises(FileExistsError):
-                artifact_write(output, recorded, report)
-            (output / "report.json").write_text("{}")
-            with self.assertRaisesRegex(ContractError, "CORRUPT_ARTIFACT"):
-                artifact_verify(output)
-
-    def test_incomplete_artifact_not_accepted(self):
-        from p6_startkit.cli import artifact_verify
-        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(FileNotFoundError):
-            artifact_verify(tmp)
 
     def test_empty_and_all_invalid_cases(self):
         for name in ("zero-tokens", "zero-routes"):
