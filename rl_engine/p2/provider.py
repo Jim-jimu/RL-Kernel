@@ -21,7 +21,7 @@ from .contract import (
     schema_guard,
     validate_runtime_policy,
 )
-from .planner import compare_snapshots, validate_snapshot
+from .planner import compare_snapshots, validate_state_sequence
 
 
 class Provider(Protocol):
@@ -78,15 +78,7 @@ def validate_envelope(envelope: dict) -> None:
         "source/recording fingerprint",
     )
     validate_runtime_policy(envelope["runtime_policy"])
-    require(
-        isinstance(envelope["states"], list) and len(envelope["states"]) > 0,
-        Status.INCOMPLETE_ARTIFACT,
-        "per-token states",
-    )
-    for i, state in enumerate(envelope["states"]):
-        require(state["identity"] == envelope["identity"], Status.IDENTITY_DRIFT, "state identity")
-        require(state["position"] == i, Status.INVALID_GLOBAL_POSITION, "missing/reordered state")
-        validate_snapshot(state)
+    validate_state_sequence(envelope["states"], envelope["identity"])
 
 
 @schema_guard

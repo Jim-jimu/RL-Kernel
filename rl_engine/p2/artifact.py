@@ -32,7 +32,7 @@ from .contract import (
 )
 from .fixtures import catalog, required_evidence, selector_recipe
 from .negative import evaluate_negative, negative_cases
-from .planner import validate_snapshot
+from .planner import validate_state_sequence
 
 ARTIFACT_VERSION = "p2-sealed-artifact.v1"
 DTYPE_BYTES = {"float32": 4, "bfloat16": 2, "int64": 8, "uint8": 1, "bool": 1}
@@ -199,14 +199,8 @@ def validate_payload(payload: dict) -> dict:
             "per-token state snapshots",
         )
         identity = snapshots[0]["identity"]
-        for i, state in enumerate(snapshots):
-            require(
-                state["identity"] == identity and identity["layer"] == layer,
-                Status.IDENTITY_DRIFT,
-                "layer/state identity",
-            )
-            require(state["position"] == i, Status.INVALID_GLOBAL_POSITION, "state positions")
-            validate_snapshot(state)
+        require(identity["layer"] == layer, Status.IDENTITY_DRIFT, "layer/state identity")
+        state_hashes = validate_state_sequence(snapshots, identity)
         require(
             set(sequence["mode_state_hashes"]) == set(MODES),
             Status.INCOMPLETE_ARTIFACT,
@@ -214,7 +208,7 @@ def validate_payload(payload: dict) -> dict:
         )
         for mode, hashes in sequence["mode_state_hashes"].items():
             require(
-                hashes == [s["state_hash"] for s in snapshots],
+                hashes == state_hashes,
                 Status.STATE_BYTES_MISMATCH,
                 f"{layer}/{mode}",
             )

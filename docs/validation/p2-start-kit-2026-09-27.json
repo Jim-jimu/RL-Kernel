@@ -5,14 +5,14 @@
     "errors": 0,
     "failed": 0,
     "gpu_cases": 5,
-    "passed": 305,
-    "seconds": 23.878,
+    "passed": 311,
+    "seconds": 24.607,
     "skip_reasons": [
       "set P2_RUN_GPU=1 for CUDA hardware gates"
     ],
     "skipped": 5,
-    "total": 310,
-    "xml_sha256": "8636d19591443d85e0c5e5359129b6606625c72057c81022bf9b3204d2079d2f"
+    "total": 316,
+    "xml_sha256": "8a8bfc4fb879235b59b92081e70635e0b697ded4c37889a15c34ab55b7192251"
   },
   "date": "2026-09-27",
   "existing_contract_regression": {
@@ -20,18 +20,29 @@
     "failed": 0,
     "gpu_cases": 0,
     "passed": 103,
-    "seconds": 0.083,
+    "seconds": 0.077,
     "skip_reasons": [
       "Hopper with compiled RMSNorm and RoPE CUDA kernels is required"
     ],
     "skipped": 2,
     "total": 105,
-    "xml_sha256": "04e81d388646edec8f5eb17e7697f198f0b24ff4e95ae9f2ad8085ef59aef129"
+    "xml_sha256": "43b0d23e1ed9836ecd547fb15ce978e69e534512a875416ba1e9a94edae39e4a"
   },
-  "implementation_source_fingerprint": "032051ddd2aa2dc72b048ee325059ab88ac3b9472ef583e023c39ba84347d1e6",
+  "implementation_source_fingerprint": "28da9cf3351b3e199b61360eda84918b2ba46ee6c76022769b98dd09b2411c04",
   "lint": {
     "ruff_check": "PASS",
     "ruff_format_check": "PASS"
+  },
+  "minimal_refactor": {
+    "current_source_fingerprint": "28da9cf3351b3e199b61360eda84918b2ba46ee6c76022769b98dd09b2411c04",
+    "payload_equal_except_implementation_provenance": true,
+    "prior_sealed_artifact_reverified": "PASS",
+    "prior_source_fingerprint": "032051ddd2aa2dc72b048ee325059ab88ac3b9472ef583e023c39ba84347d1e6",
+    "production_kernel_or_core_changes": 0,
+    "recordings": 15,
+    "scope": "shared state-sequence validation only",
+    "snapshot_count": 3075,
+    "status": "PASS"
   },
   "nccl_default_path": {
     "failure": "NVLS multicast memory binding failed with CUDA 401",
@@ -177,21 +188,21 @@
       "C128"
     ],
     "payload_file": "payload.json",
-    "resume_identity": "e4ac4f3f24b89d85ee4b067b70dc3d76b880a83550d8da98ac496edac6ecb148",
+    "resume_identity": "2ba911c7d35407bb9cd554bb8aabea413ef93d55fc04df9e0bd2f3c79792927a",
     "schema": "p2-sealed-artifact.v1",
-    "seal_sha256": "2c43d88c0cda81c4e9b6b073911c4ee31e5b0b24e5ffa9467781d6d01e08839f",
-    "sha256": "e186977de9b8a22987f95536b684d98ff1ee28b74ae9652712e6991d2cda52c1",
+    "seal_sha256": "86a6dc69a0aea0917eb69d14f7d9a623e03ff413dbfa128f0c51a8f33452eae4",
+    "sha256": "df0a5248aa99eef721c19f958b7299377067f926ae9fd96e53ae06768b47fed2",
     "tokens_per_layer": 1025
   },
   "start_kit_with_all_visible_gpus": {
     "errors": 0,
     "failed": 0,
     "gpu_cases": 40,
-    "passed": 345,
-    "seconds": 26.712,
+    "passed": 351,
+    "seconds": 27.483,
     "skip_reasons": [],
     "skipped": 0,
-    "total": 345,
-    "xml_sha256": "8bb13e24c8102f9403f6803f82ac0c2d5f87c1f11c2a96229a2cda8e4e8b4964"
+    "total": 351,
+    "xml_sha256": "0f1b18f5018902e5b081a779e7081dad9e2b6248f12565b052b762d10a601026"
   }
 }

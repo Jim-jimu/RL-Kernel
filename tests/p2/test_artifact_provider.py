@@ -263,3 +263,41 @@ def test_resume_identity_changes_with_input_length(tmp_path, payload):
     a = json.loads((tmp_path / "eight" / "manifest.json").read_text())
     b = json.loads((tmp_path / "nine" / "manifest.json").read_text())
     assert a["resume_identity"] != b["resume_identity"]
+
+
+@pytest.mark.parametrize(
+    "fault,status",
+    [
+        ("valid", None),
+        ("empty", Status.INCOMPLETE_ARTIFACT),
+        ("reordered", Status.INVALID_GLOBAL_POSITION),
+        ("missing", Status.INVALID_GLOBAL_POSITION),
+        ("identity", Status.IDENTITY_DRIFT),
+        ("corrupt", Status.STATE_BYTES_MISMATCH),
+    ],
+)
+def test_artifact_and_provider_share_state_gate(payload, envelope, fault, status):
+    candidate = copy.deepcopy(payload)
+    sequence = candidate["sequences"]["C4"]
+    states = sequence["snapshots"]
+    if fault == "empty":
+        states.clear()
+    elif fault == "reordered":
+        states[2], states[3] = states[3], states[2]
+    elif fault == "missing":
+        del states[3]
+    elif fault == "identity":
+        states[3]["identity"]["main"] = "different-main"
+    elif fault == "corrupt":
+        states[3]["state_hash"] = "corrupt"
+    sequence["tokens"] = len(states)
+    envelope["states"] = states
+    before = canonical(states)
+    for validator, value in ((validate_payload, candidate), (validate_envelope, envelope)):
+        if status is None:
+            validator(value)
+        else:
+            with pytest.raises(ContractError) as error:
+                validator(value)
+            assert error.value.status == status
+    assert canonical(states) == before

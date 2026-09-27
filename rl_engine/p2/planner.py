@@ -233,6 +233,23 @@ def validate_snapshot(s: dict) -> None:
     )
 
 
+@schema_guard
+def validate_state_sequence(states: list[dict], identity: dict) -> list[str]:
+    """Shared per-token gate for live envelopes and sealed recordings."""
+    require(
+        isinstance(states, list) and len(states) > 0, Status.INCOMPLETE_ARTIFACT, "per-token states"
+    )
+    hashes = []
+    for position, state in enumerate(states):
+        require(state["identity"] == identity, Status.IDENTITY_DRIFT, "state identity")
+        require(
+            state["position"] == position, Status.INVALID_GLOBAL_POSITION, "missing/reordered state"
+        )
+        validate_snapshot(state)
+        hashes.append(state["state_hash"])
+    return hashes
+
+
 def compare_snapshots(expected: dict, actual: dict) -> Status:
     # Identity before state, and state before any downstream output comparison.
     require(expected["identity"] == actual["identity"], Status.IDENTITY_DRIFT, "state identity")
