@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,8 @@ namespace {
 
 constexpr int kMaxDeterministicWorldSize = 8;
 constexpr int kThreads = 256;
+// Give the one-block graph-safe path more lanes for IPC staging and peer reads.
+constexpr int kFusedFastThreads = 1024;
 constexpr int kMaxBlocks = 4096;
 constexpr int kStagingFrames = 3;
 constexpr int kFusedStagingSlots = 2;
@@ -40,6 +43,21 @@ constexpr int64_t kSingleBlockFastPathMaxBytes = 256 * 1024;
 // canonical result, while leaving true large transfers on the established
 // parallel path.
 constexpr int64_t kOwnerReduceMaxBytes = 4 * 1024 * 1024;
+
+int64_t graph_multiblock_min_bytes() {
+  static const int64_t threshold = [] {
+    const char* raw = std::getenv("RL_KERNEL_CUDA_GRAPH_MULTIBLOCK_MIN_BYTES");
+    if (raw == nullptr || *raw == '\0') {
+      return kSingleBlockFastPathMaxBytes + 1;
+    }
+    char* end = nullptr;
+    const int64_t value = std::strtoll(raw, &end, 10);
+    TORCH_CHECK(end != raw && *end == '\0' && value > 0,
+                "RL_KERNEL_CUDA_GRAPH_MULTIBLOCK_MIN_BYTES must be a positive integer");
+    return value;
+  }();
+  return threshold;
+}
 
 struct PeerPointers {
   const void* values[kMaxDeterministicWorldSize];
@@ -317,12 +335,22 @@ __global__ void deterministic_all_reduce_graph_safe_fused_fast_kernel(
   if constexpr (std::is_same_v<T, nv_bfloat16>) {
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
     const int64_t pair_count = element_count / 2;
-    auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
-    for (int64_t pair_index = threadIdx.x;
-         pair_index < pair_count;
-         pair_index += blockDim.x) {
-      pair_output[pair_index] =
-          fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
+    if ((reinterpret_cast<uintptr_t>(output) & (alignof(nv_bfloat162) - 1)) == 0) {
+      auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
+      for (int64_t pair_index = threadIdx.x;
+           pair_index < pair_count;
+           pair_index += blockDim.x) {
+        pair_output[pair_index] =
+            fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
+      }
+    } else {
+      for (int64_t pair_index = threadIdx.x;
+           pair_index < pair_count;
+           pair_index += blockDim.x) {
+        const auto pair = fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
+        output[2 * pair_index] = __low2bfloat16(pair);
+        output[2 * pair_index + 1] = __high2bfloat16(pair);
+      }
     }
     if ((element_count & 1) != 0 && threadIdx.x == 0) {
       output[element_count - 1] =
@@ -652,6 +680,33 @@ __global__ void deterministic_all_reduce_kernel(
   }
 }
 
+template <int WorldSize>
+__global__ void deterministic_all_reduce_packed_bf16_kernel(
+    PeerPointers peers,
+    nv_bfloat16* output,
+    int64_t element_count) {
+  const int64_t thread_index =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+  const int64_t pair_count = element_count / 2;
+  if ((reinterpret_cast<uintptr_t>(output) & (alignof(nv_bfloat162) - 1)) == 0) {
+    auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
+    for (int64_t index = thread_index; index < pair_count; index += stride) {
+      pair_output[index] = fixed_tree_reduce_bf16x2<WorldSize>(peers, index);
+    }
+  } else {
+    for (int64_t index = thread_index; index < pair_count; index += stride) {
+      const auto pair = fixed_tree_reduce_bf16x2<WorldSize>(peers, index);
+      output[2 * index] = __low2bfloat16(pair);
+      output[2 * index + 1] = __high2bfloat16(pair);
+    }
+  }
+  if ((element_count & 1) != 0 && thread_index == 0) {
+    output[element_count - 1] =
+        fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, element_count - 1);
+  }
+}
+
 template <typename T>
 void launch_all_reduce(
     const PeerPointers& peers,
@@ -676,6 +731,35 @@ void launch_all_reduce(
     case 8:
       deterministic_all_reduce_kernel<T, 8><<<blocks, kThreads, 0, stream>>>(
           peers, output, element_count);
+      break;
+    default:
+      TORCH_CHECK(false, "unsupported deterministic collective world size ", world_size);
+  }
+}
+
+void launch_all_reduce_packed_bf16(
+    const PeerPointers& peers,
+    nv_bfloat16* output,
+    int64_t element_count,
+    int blocks,
+    int64_t world_size,
+    cudaStream_t stream) {
+  switch (world_size) {
+    case 1:
+      deterministic_all_reduce_packed_bf16_kernel<1>
+          <<<blocks, kThreads, 0, stream>>>(peers, output, element_count);
+      break;
+    case 2:
+      deterministic_all_reduce_packed_bf16_kernel<2>
+          <<<blocks, kThreads, 0, stream>>>(peers, output, element_count);
+      break;
+    case 4:
+      deterministic_all_reduce_packed_bf16_kernel<4>
+          <<<blocks, kThreads, 0, stream>>>(peers, output, element_count);
+      break;
+    case 8:
+      deterministic_all_reduce_packed_bf16_kernel<8>
+          <<<blocks, kThreads, 0, stream>>>(peers, output, element_count);
       break;
     default:
       TORCH_CHECK(false, "unsupported deterministic collective world size ", world_size);
@@ -744,25 +828,25 @@ void launch_all_reduce_graph_safe_fused_fast(
   switch (world_size) {
     case 1:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 1>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, kFusedFastThreads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 2:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 2>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, kFusedFastThreads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 4:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 4>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, kFusedFastThreads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 8:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 8>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, kFusedFastThreads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
@@ -1487,6 +1571,44 @@ class DeterministicCollectiveState {
     TORCH_CHECK(
         output.numel() == input.numel(),
         "all-reduce output size must match the input size");
+
+    // The graph-safe single-slot protocol also permits a separate staging
+    // kernel and a parallel reduction. Keep this opt-in until full-model
+    // measurements establish that extra launches beat the one-block path.
+    if (input_bytes >= graph_multiblock_min_bytes() &&
+        input_bytes <= kSingleBlockFastPathMaxBytes) {
+      stage_payload_fast_kernel<<<1, kFusedFastThreads, 0, stream>>>(
+          peers_, world_size_, local_stage_sequence_,
+          static_cast<const uint8_t*>(input.data_ptr()),
+          const_cast<uint8_t*>(static_cast<const uint8_t*>(peers_.values[rank_])),
+          input_bytes);
+      AT_CUDA_CHECK(cudaGetLastError());
+      wait_for_staged_peers(stream);
+      const int blocks = static_cast<int>(std::min<int64_t>(
+          512, (output.numel() + kThreads - 1) / kThreads));
+      switch (input.scalar_type()) {
+        case at::ScalarType::Float:
+          launch_all_reduce<float>(peers_, static_cast<float*>(output.data_ptr()),
+                                   output.numel(), blocks, world_size_, stream);
+          break;
+        case at::ScalarType::Half:
+          launch_all_reduce<half>(peers_, static_cast<half*>(output.data_ptr()),
+                                  output.numel(), blocks, world_size_, stream);
+          break;
+        case at::ScalarType::BFloat16:
+          launch_all_reduce_packed_bf16(
+              peers_, static_cast<nv_bfloat16*>(output.data_ptr()),
+              output.numel(), static_cast<int>(std::min<int64_t>(
+                  512, ((output.numel() / 2) + kThreads - 1) / kThreads)),
+              world_size_, stream);
+          break;
+        default:
+          TORCH_CHECK(false, "unsupported graph multiblock all-reduce dtype");
+      }
+      AT_CUDA_CHECK(cudaGetLastError());
+      publish_done(stream);
+      return;
+    }
 
     // Fuse the hot small-message path without changing the graph-safe
     // single-slot sequence protocol or the fixed-tree reduction order. The

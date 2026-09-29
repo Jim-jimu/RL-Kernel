@@ -119,6 +119,33 @@ def _worker(rank: int, port: int) -> None:
                             )
                             assert returned is misaligned_output
                             assert torch.equal(misaligned_output, packed_expected)
+
+                    if tp_size == 4 and os.environ.get("RL_KERNEL_CUDA_GRAPH_MULTIBLOCK_MIN_BYTES"):
+                        generator = torch.Generator(device=device).manual_seed(20260929 + rank)
+                        for count, misaligned in (
+                            (16384, False), (65536, False), (65537, False), (65536, True)
+                        ):
+                            graph_input = torch.empty(count, dtype=torch.bfloat16, device=device)
+                            output_storage = torch.empty(count + int(misaligned), dtype=torch.bfloat16, device=device)
+                            graph_output = output_storage[int(misaligned):]
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph):
+                                collective.all_reduce(
+                                    graph_input, out=graph_output, validate_signature=False
+                                )
+                            dist.barrier(group=group)
+                            for iteration in range(8):
+                                values = (
+                                    torch.randn(count, device=device, generator=generator)
+                                    * (rank + 1) / 8 + iteration / 64
+                                ).to(torch.bfloat16)
+                                graph_input.copy_(values)
+                                graph.replay()
+                                torch.cuda.synchronize()
+                                expected = _fixed_tree_reference(
+                                    _all_gather_tensors(values, group, tp_size)
+                                )
+                                assert torch.equal(graph_output, expected)
             dist.barrier()
     finally:
         dist.destroy_process_group()
