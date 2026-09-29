@@ -1072,6 +1072,7 @@ def install_megatron_integration(
     *,
     attention_classes: Iterable[type[Any]] | None = None,
     ffn_classes: Iterable[type[Any]] | None = None,
+    patch_output_layer: bool = True,
 ) -> MegatronIntegration:
     """Install Attention, dense FFN and structural Logp routes in one actor."""
 
@@ -1108,7 +1109,7 @@ def install_megatron_integration(
 
     set_active_integration("megatron", integration)
     _patch_layer_alignment_diagnostics()
-    if plan.implementation_for("logp", "training") is Implementation.RL_KERNEL:
+    if patch_output_layer and plan.implementation_for("logp", "training") is Implementation.RL_KERNEL:
         _patch_strict_logp_output_layer()
     if plan.implementation_for("attention", "training") is Implementation.RL_KERNEL:
         _patch_strict_rocm_rope()
@@ -1138,18 +1139,20 @@ def install_megatron_integration(
     return integration
 
 
-def initialize_from_environment(_args: Any = None) -> MegatronIntegration:
+def initialize_from_environment(
+    _args: Any = None, *, patch_output_layer: bool = True, canonical_cp_installer: Callable | None = None
+) -> MegatronIntegration:
     """Vime-compatible custom-init entry point backed by the shared plan env."""
 
     from rl_engine.integrations.ablation import integration_plan_from_environment
 
     _install_torch_dist_object_compatibility()
     plan = integration_plan_from_environment()
-    integration = install_megatron_integration(plan)
+    integration = install_megatron_integration(plan, patch_output_layer=patch_output_layer)
     if plan.implementation_for("attention", "training") is Implementation.RL_KERNEL:
         _precompile_strict_attention_training(_args)
     if os.getenv("RL_KERNEL_CANONICAL_CP_GRAD", "0") == "1":
-        canonical_cp.install()
+        (canonical_cp_installer or canonical_cp.install)()
     return integration
 
 

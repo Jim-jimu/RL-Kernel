@@ -55,8 +55,23 @@ def _kernel(device):
         arch=torch.cuda.get_device_properties(device).gcnArchName.split(':')[0]
         source='#include <hip/hip_runtime.h>\n'+_SOURCE
     else:
-        libs=glob.glob(str(Path(torch.__file__).parent.parent/'nvidia/cuda_nvrtc/lib/libnvrtc.so*'))
-        rtc=C.CDLL(sorted(libs,key=len)[0] if libs else 'libnvrtc.so.12')
+        site_packages = Path(torch.__file__).parent.parent
+        libs = []
+        libs.extend(glob.glob(str(site_packages / 'nvidia/cuda_nvrtc/lib/libnvrtc.so*')))
+        libs.extend(glob.glob(str(site_packages / 'nvidia/cu*/lib/libnvrtc.so*')))
+        libs.extend(glob.glob('/usr/local/cuda*/targets/x86_64-linux/lib/libnvrtc.so*'))
+        libs = [path for path in libs if 'stubs' not in path]
+        if libs:
+            rtc = C.CDLL(sorted(set(libs), key=len)[0])
+        else:
+            for library in ('libnvrtc.so.13', 'libnvrtc.so.12', 'libnvrtc.so'):
+                try:
+                    rtc = C.CDLL(library)
+                    break
+                except OSError:
+                    rtc = None
+            if rtc is None:
+                raise OSError('unable to locate a usable libnvrtc.so (tried CUDA 13 and CUDA 12)')
         driver=C.CDLL('libcuda.so.1');prefix='nvrtc';module_prefix='cu'
         major,minor=torch.cuda.get_device_capability(device)
         arch=f'compute_{major}{minor}';source=_SOURCE
@@ -76,6 +91,11 @@ def _kernel(device):
     code=C.create_string_buffer(size.value)
     _checked(getattr(rtc,prefix+'Get'+getter)(program,code),'get norm code')
     getattr(rtc,prefix+'DestroyProgram')(C.byref(program))
+    device_handle=C.c_int()
+    _checked(driver.cuDeviceGet(C.byref(device_handle),key),'get norm device')
+    context=C.c_void_p()
+    _checked(driver.cuDevicePrimaryCtxRetain(C.byref(context),device_handle),'retain norm context')
+    _checked(driver.cuCtxSetCurrent(context),'set norm context')
     module=C.c_void_p();function=C.c_void_p()
     _checked(getattr(driver,module_prefix+'ModuleLoadData')(C.byref(module),code),'load norm module')
     _checked(getattr(driver,module_prefix+'ModuleGetFunction')(C.byref(function),module,b'bin_squares'),'load norm kernel')

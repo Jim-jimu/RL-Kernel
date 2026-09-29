@@ -422,7 +422,7 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
             entropy_request = request
             if not _is_identity_temperature(local_logits_temperature):
                 entropy_request = replace(
-                    request, logits=request.logits.float() / local_logits_temperature
+                    request, logits=request.logits.float() / local_logits_temperature.reshape(-1, 1)
                 )
             entropy_contract, entropy_tiles = _contract_for_request(entropy_request)
             entropy_dispatch = kernel_registry.get_logprob_op(

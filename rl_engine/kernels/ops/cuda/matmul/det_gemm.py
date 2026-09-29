@@ -22,6 +22,7 @@ _AUTO_BACKEND = "auto"
 _SM90_BACKEND = "sm90"
 _CUBLASLT_BACKEND = "cublaslt_nosplitk"
 _CUBLASLT_CONFIGURED = False
+_SM90_COMPILED = bool(_EXT_AVAILABLE and _C is not None and getattr(_C, "det_gemm_sm90_compiled", lambda: False)())
 _ROUTE_REPORTED = False
 _ROUTE_REPORT_LOCK = Lock()
 
@@ -126,8 +127,7 @@ def _configure_cublaslt_nosplitk(a: torch.Tensor | None = None) -> None:
 
 
 def _require_sm90_backend() -> None:
-    marker = getattr(_C, "det_gemm_sm90_compiled", None)
-    if not _EXT_AVAILABLE or not callable(marker) or not marker():
+    if not _SM90_COMPILED:
         raise RuntimeError(
             "strict RL-Kernel SM90 GEMM was requested, but the extension was "
             "built without KERNEL_ALIGN_DET_GEMM_SM90=1; refusing naive fallback"

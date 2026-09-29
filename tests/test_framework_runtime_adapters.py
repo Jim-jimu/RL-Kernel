@@ -14,6 +14,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from rl_engine.distributed.collectives import DETERMINISTIC_ALL_REDUCE_OP
 import rl_engine.integrations.framework_operators as framework_operators
 from rl_engine.integrations.ablation import (
     IntegrationPlan,
@@ -38,6 +39,7 @@ from rl_engine.integrations.megatron_runtime import (
 from rl_engine.integrations.runtime import FrameworkOperatorIntegration
 from rl_engine.integrations.state import clear_active_integration
 from rl_engine.integrations.vllm_runtime import (
+    _configure_strict_ffn_compilation,
     _patch_qwen3_strict_model,
     _patch_strict_rocm_rotary_embedding,
     _register_attention_backend,
@@ -56,6 +58,21 @@ from rl_engine.kernels.attention_contract import (
 from rl_engine.kernels.ops.cuda.attention.strict_runtime import (
     StrictCUDAAttentionRuntime,
 )
+
+
+def test_cuda_strict_ffn_compilation_preserves_bf16_casts(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            splitting_ops=[DETERMINISTIC_ALL_REDUCE_OP, "vllm::other"],
+            inductor_compile_config={},
+        )
+    )
+
+    _configure_strict_ffn_compilation(config)
+
+    assert config.compilation_config.inductor_compile_config["emulate_precision_casts"] is True
+    assert config.compilation_config.splitting_ops == ["vllm::other"]
 
 
 def test_vllm_tp1_ffn_reports_no_physical_collective(monkeypatch):

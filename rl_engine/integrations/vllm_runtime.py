@@ -921,6 +921,8 @@ def _configure_strict_ffn_compilation(vllm_config: Any | None = None) -> None:
     if splitting_ops is None:
         raise RuntimeError("vLLM splitting operators were not finalized before model init")
     if torch.version.hip is None:
+        # Preserve intermediate BF16 rounding across Inductor fusion on CUDA.
+        compilation.inductor_compile_config["emulate_precision_casts"] = True
         # Preserve the CUDA full-graph path introduced by PR 377.
         splitting_ops[:] = [
             op for op in splitting_ops if op != DETERMINISTIC_ALL_REDUCE_OP
@@ -1306,6 +1308,14 @@ def _patch_qwen3_strict_model(
     def bind_o_proj_collective(module: Any) -> None:
         global _RLK_O_PROJ_COLLECTIVE_BACKEND
 
+        if production_classes and torch.version.hip is None:
+            from rl_engine.kernels.ops.cuda.matmul.det_gemm import (
+                _configure_cublaslt_nosplitk,
+                det_gemm_backend,
+            )
+
+            if det_gemm_backend() == "cublaslt_nosplitk":
+                _configure_cublaslt_nosplitk(module.weight)
         if int(getattr(module, "tp_size", 1)) <= 1:
             _RLK_O_PROJ_COLLECTIVE_BACKEND = "none"
             return
@@ -1419,7 +1429,11 @@ def _patch_qwen3_strict_model(
 
         def rotary_init_wrapped(instance: Any, *args: Any, **kwargs: Any) -> None:
             rotary_init(instance, *args, **kwargs)
-            instance._forward_method = instance.forward_cuda
+            # vLLM >= 0.20 CUDA RoPE rounds once from FP32; Megatron's unfused
+            # RoPE rounds each BF16 product and sum, which forward_native keeps.
+            instance._forward_method = (
+                instance.forward_cuda if torch.version.hip is not None else instance.forward_native
+            )
             cache = getattr(instance, "cos_sin_cache", None)
             prepare = getattr(instance, "_rl_kernel_prepare_strict_rocm_tables", None)
             if (

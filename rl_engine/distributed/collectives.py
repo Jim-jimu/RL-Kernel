@@ -8,7 +8,6 @@ import socket
 import sys
 import threading
 from collections.abc import Iterable
-from contextlib import nullcontext
 from types import TracebackType
 from typing import Any
 
@@ -30,6 +29,9 @@ DETERMINISTIC_STAGED_ALL_REDUCE_OP = "rl_kernel::deterministic_staged_all_reduce
 
 def _ipc_allocation_context():
     """IPC handles require resident cudaMalloc storage, not offloadable VMM."""
+    # verl's vLLM server enables expandable segments before loading the model.
+    # CUDA IPC cannot export those VMM allocations, even without a memory saver.
+    torch.cuda.memory._set_allocator_settings("expandable_segments:False")
     module = sys.modules.get("torch_memory_saver")
     saver = getattr(module, "torch_memory_saver", None)
     impl = getattr(saver, "_impl", None)
@@ -42,7 +44,7 @@ def _ipc_allocation_context():
         # in PyTorch's default pool. A fresh pool must own IPC storage even
         # when allocation hooks are currently disabled (e.g. another Ray call).
         return torch.cuda.use_mem_pool(torch.cuda.MemPool())
-    return nullcontext()
+    return torch.cuda.use_mem_pool(torch.cuda.MemPool())
 
 
 @torch.library.custom_op(DETERMINISTIC_ALL_REDUCE_OP, mutates_args={"input"})
@@ -425,6 +427,10 @@ class DeterministicCollective:
     ) -> torch.Tensor | None:
         """Return a pre-bound direct-output view, or ``None`` for an uncaptured shape."""
 
+        # Dynamo's dynamic token count must not be converted to an int or
+        # compared against the concrete keys of the eagerly allocated views.
+        if torch.compiler.is_compiling():
+            return None
         return self._direct_staging_views.get((tuple(int(dim) for dim in shape), dtype))
 
     def all_reduce(

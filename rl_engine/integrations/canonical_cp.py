@@ -46,6 +46,91 @@ def packed_gather_indices(lengths, local_rows, cp_world):
     return out
 
 
+def padded_gather_indices(lengths, padded_lengths, local_rows, cp_world):
+    """Map verl's per-sequence TP-aligned zigzag shards to valid token order."""
+    if len(lengths) != len(padded_lengths):
+        raise ValueError('canonical CP sequence counts differ')
+    out = []
+    offset = 0
+    for length, padded in zip(lengths, padded_lengths):
+        if length < 0 or padded < length or padded % (2 * cp_world):
+            raise ValueError('invalid canonical CP padded sequence')
+        width = padded // (2 * cp_world)
+        for pos in range(length):
+            block, within = divmod(pos, width)
+            rank = block if block < cp_world else 2 * cp_world - 1 - block
+            out.append(rank * local_rows + offset + within + (width if block >= cp_world else 0))
+        offset += padded // cp_world
+    if offset != local_rows:
+        raise ValueError('canonical CP padded token rows differ from model input')
+    return out
+
+
+def install_verl():
+    """Install the shared canonical gradient scheduler at verl's packed model boundary."""
+    from megatron.core import parallel_state as mpu
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.tensor_parallel.layers import VocabParallelEmbedding
+    from megatron.core.tensor_parallel.mappings import reduce_from_tensor_model_parallel_region
+    from megatron.core.tensor_parallel.random import CheckpointFunction
+
+    if getattr(GPTModel, '_rlk_cp_parameter_grads', False):
+        return
+    from rl_engine.integrations.reproducible_norm import install as install_norm
+    install_norm()
+    checkpoint_forward = CheckpointFunction.forward
+
+    @wraps(checkpoint_forward)
+    def checkpoint(ctx, function, distribute_saved_activations, *args):
+        layout = current_layout()
+        if layout is not None:
+            function = bind_layout(function, layout)
+        return checkpoint_forward(ctx, function, distribute_saved_activations, *args)
+
+    original_forward = GPTModel.forward
+
+    @wraps(original_forward)
+    def forward(self, *args, **kwargs):
+        packed = kwargs.get('packed_seq_params')
+        lengths = getattr(packed, '_rlk_true_lengths', None)
+        if lengths is None or not torch.is_grad_enabled():
+            return original_forward(self, *args, **kwargs)
+        ids = kwargs.get('input_ids', args[0] if args else None)
+        if ids is None or ids.size(0) != 1:
+            raise ValueError('canonical packed CP backward requires batch dimension one')
+        cp = mpu.get_context_parallel_world_size()
+        padded = packed.cu_seqlens_q_padded.tolist()
+        padded_lengths = [end - start for start, end in zip(padded, padded[1:])]
+        layout = CPLayout(
+            torch.tensor(padded_gather_indices(lengths, padded_lengths, ids.size(1), cp), device=ids.device),
+            ids.size(1), cp, mpu.get_context_parallel_group(),
+            mpu.get_tensor_model_parallel_world_size(), mpu.get_tensor_model_parallel_group(),
+            mpu.get_context_parallel_rank(), mpu.get_tensor_model_parallel_rank(),
+        )
+        token = _ACTIVE.set(layout)
+        try:
+            return original_forward(self, *args, **kwargs)
+        finally:
+            _ACTIVE.reset(token)
+
+    original_embedding = VocabParallelEmbedding.forward
+
+    @wraps(original_embedding)
+    def embedding(self, ids):
+        layout = current_layout()
+        if layout is None:
+            return original_embedding(self, ids)
+        if self.reduce_scatter_embeddings:
+            raise ValueError('canonical CP embedding does not support sequence parallelism')
+        local = CPEmbedding.apply(ids, self.weight, self.vocab_start_index, layout)
+        return reduce_from_tensor_model_parallel_region(local, group=self.tp_group)
+
+    CheckpointFunction.forward = staticmethod(checkpoint)
+    VocabParallelEmbedding.forward = embedding
+    GPTModel.forward = forward
+    GPTModel._rlk_cp_parameter_grads = True
+
+
 @dataclass
 class CPLayout:
     order: torch.Tensor
